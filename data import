@@ -1,0 +1,206 @@
+---
+title: "Quality Data Assessment"
+subtitle: "Sistema de Informação sobre Nascidos Vivos (SINASC)"
+output: html_notebook
+---
+
+$~$
+
+#### Links úteis
+
++ [WHO Recommendations](https://www.who.int/nutrition/publications/anthropometry-data-quality-report/en/)
++ [Info SINASC](http://svs.aids.gov.br/dantps/cgiae/sinasc/)
++ [Biblioteca "microdatasus"](https://github.com/rfsaldanha/microdatasus/wiki/fetch_datasus)
++ [IGO Standards](https://intergrowth21.tghn.org/standards-tools/)
++ [WHO Standards](https://www.who.int/childgrowth/en/)
+
+$~$
+
+#### CARREGAR BIBLIOTECAS
+
+```{r message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(hablar)
+library(growthstandards)
+library(moments)
+#library(microdatasus)
+```
+
+$~$
+
+#### CARREGAR FUNÇÕES
+
+```{r}
+zscore = function(measure) {
+  (measure - mean_(measure)) / sd_(measure)  
+}
+```
+
+$~$
+
+##### INGESTÃO DE DADOS
+
+```{r}
+# DNBR2017 = fetch_datasus(year_start = 2017, year_end = 2017, uf = "all", information_system = "SINASC")
+load("C:/Users/Ronaldo Alves/Desktop/SONY2020/SINASC/DNBR2017.RData")
+```
+
+$~$
+
+##### CURADORIA DE DADOS
+
+```{r}
+DNBR2017 = DNBR2017 %>% 
+  select(NUMERODN, CODESTAB, 
+         CODMUNRES, DTNASC, SEXO, PESO, IDANOMAL, CODANOMAL, 
+         DTNASCMAE, DTULTMENST, ESCMAE2010, CODOCUPMAE,
+         PARTO, CONSPRENAT, MESPRENAT, SEMAGESTAC, GESTACAO, IDADEMAE) %>%  
+  mutate(dtnascmae = dmy(DTNASCMAE), 
+         dum = dmy(DTULTMENST), 
+         codufres = as.integer(str_sub(CODMUNRES, end = 2)),
+         dtnascrn = dmy(DTNASC),
+         #sex = factor(SEXO, levels = c(0,1,2), labels = c(NA_character_,"Male","Female")),
+         sex = case_when(SEXO == 1 ~ "Male", SEXO == 2 ~ "Female", TRUE ~ NA_character_),
+         weight = as.integer(PESO),
+         idanomal = case_when(IDANOMAL == 1 | !is.na(CODANOMAL) ~ 1, TRUE ~ 0),
+         parto = factor(PARTO, levels = c(1,2,9), labels = c("VAGINAL","CESARIO",NA_character_)),
+         daygest = time_length(dtnascrn - dum, unit = "day"),
+         daygest2 = as.numeric(SEMAGESTAC) * 7,
+         weekgest = time_length(dtnascrn - dum, unit = "week"),
+         agemae = round(time_length(dtnascrn - dtnascmae, unit = "year"), 2),
+         agemae = as.integer(str_sub(agemae, end = 2))) %>% 
+  mutate(whozscore = case_when(sex == "Male" ~ who_wtkg2zscore(0, weight/1000, "Male"),
+                               sex == "Female" ~ who_wtkg2zscore(0, weight/1000, "Female"),
+                               TRUE ~ NA_real_)) %>% 
+  mutate(igbzscore = case_when(sex == "Male" ~ igb_wtkg2zscore(daygest2, weight/1000, "Male"),
+                               sex == "Female" ~ igb_wtkg2zscore(daygest2, weight/1000, "Female"),
+                               TRUE ~ NA_real_)) %>% 
+  mutate(implau_who = case_when(between(whozscore, -6, 5) ~ 0,
+                                !between(whozscore, -6, 5) ~ 1,
+                                TRUE ~ NA_real_),
+         implau_igo = case_when(between(igbzscore, -6, 5) ~ 0,
+                                !between(igbzscore, -6, 5) ~ 1,
+                                TRUE ~ NA_real_))
+```
+
+$~$
+
+##### DUPLICATES
+
+```{r}
+table(duplicated(DNBR2017$NUMERODN))
+DNBR2017_dup = DNBR2017 %>% group_by(NUMERODN) %>% filter(n() > 1) %>% arrange(NUMERODN)
+```
+
+$~$
+
+##### COMPLETENESS (POPULATION AND DATA)
+
+```{r}
+summary(DNBR2017$weight)
+summary(DNBR2017$dtnascrn)
+```
+
+$~$
+
+##### SEX RATIO
+
+```{r}
+sexratio = DNBR2017 %>% group_by(sex = fct_explicit_na(sex)) %>% 
+  summarise(n = n()) %>% spread(key = "sex", value = "n") %>% 
+  mutate(sexratio = (Male / Female) * 100)
+
+sexratio
+```
+
+$~$
+
+##### AGE HEAPING
+
+```{r}
+monthbirth = DNBR2017 %>% group_by(monthbirth = month(dtnascrn, label = T)) %>% summarise(n = n()) 
+```
+
+```{r}
+ggplot(monthbirth, aes(x = monthbirth, y = n)) + 
+  geom_bar(stat = "identity", fill = "lightblue", width = 0.5) +
+  scale_y_continuous(limits = c(0,280000), breaks = seq(0,300000,50000), expand = c(0,0)) + 
+  labs(x = "Month of birth", y = "Number of children") + 
+  theme_classic() + 
+  theme(panel.grid.major.x = element_line(colour = "gray")) + 
+  coord_flip()
+```
+
+$~$
+
+##### DIGIT PREFERENCES FOR WEIGHT
+
+```{r}
+termdigit = DNBR2017 %>% group_by(termdigit = str_sub(weight, start = -1)) %>% 
+  summarise(n = n()) %>% filter(!is.na(termdigit)) %>% mutate(perc = round((n / sum(n))*100,1))
+```
+
+```{r}
+ggplot(termdigit, aes(x = termdigit, y = perc)) + 
+  geom_bar(stat = "identity", fill = "lightblue", width = 0.5) +
+  scale_y_continuous(limits = c(0,70), breaks = seq(0,70,5), expand = c(0,0)) + 
+  labs(x = "Terminal digit", y = "Percentage") + 
+  theme_classic() + 
+  theme(panel.grid.major.y = element_line(colour = "gray"))
+```
+
+```{r}
+index_dissim = sum(abs(termdigit$perc - 10)) / 2 
+index_dissim
+```
+
+$~$
+
+##### IMPLAUSIBLE Z-SCORE VALUES
+
+```{r}
+DNBR2017 %>% group_by(implau_who) %>% summarise(n = n()) %>% 
+  filter(!is.na(implau_who)) %>% mutate(perc = round((n / sum(n))*100,1)) # ok < 1%
+
+DNBR2017 %>% group_by(implau_igo) %>% summarise(n = n()) %>% 
+  filter(!is.na(implau_igo)) %>% mutate(perc = round((n / sum(n))*100,1))
+```
+
+$~$
+
+##### STANDARD DEVIATION OF Z-SCORE
+
+```{r}
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% summarise(sd = sd_(whozscore)) #1.0 to 1.2
+DNBR2017 %>% filter(between(igbzscore, -5, 5)) %>% summarise(sd = sd_(igbzscore))
+```
+
+$~$
+
+##### NORMALITY (SKEWNESS AND KURTOSIS) OF Z-SCORES
+
+```{r}
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% 
+ggplot(aes(whozscore)) + geom_density(alpha = .2, fill = "#0066CC") 
+```
+
+```{r}
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% select(whozscore) %>% skewness() # -5/+5
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% select(whozscore) %>% kurtosis() # +2/+4
+```
+
+$~$
+
+##### OBSERVED Z-SCORE
+
+```{r}
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% mutate(zscore = zscore(weight)) %>% 
+  summarise(min(zscore), max(zscore), mean(zscore), median(zscore), sd(zscore))
+```
+
+```{r}
+DNBR2017 %>% filter(between(whozscore, -5, 5)) %>% mutate(zscore = zscore(weight)) %>%
+  ggplot(aes(zscore)) + geom_density() + geom_vline(xintercept = 4, color = "red")
+```
+
